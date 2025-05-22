@@ -1,12 +1,13 @@
 ################################
 ### Configuration Parameters ###
 ################################
-epochs: 40
-in_sample: "datasets/ttbar_1kEvents_mu60.pkl"
+epochs: 20
+in_sample: "datasets/data_combined.pkl"
 out_path: "output/results"
-embed_dim: 64
+embed_dim: 16
 num_heads: 4
+latent_dim: 32
 learning_rate: 0.0001
-lr_step_size: 15
+lr_step_size: 12
 lr_step_gamma: 0.1
 eval_model: "output/results/model_final.torch"

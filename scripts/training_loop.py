@@ -7,7 +7,7 @@ import torch.optim as optim
 ### Define Training Loop
 def train(model, loss_fns, optimizer, device, data, out_dir, step=15, gam=0.1, epochs=40):
     # Unpack arguments
-    jet_loss_fn,trk_loss_fn=loss_fns
+    loss_fn=loss_fns
     X_train, y_train, X_val, y_val=data
     step_size=step
     gamma=gam
@@ -34,12 +34,9 @@ def train(model, loss_fns, optimizer, device, data, out_dir, step=15, gam=0.1, e
         for i in range(num_train):
             optimizer.zero_grad()
 
-            jet_pred, trk_pred = model(X_train[i][0].to(device), X_train[i][1].to(device), X_train[i][2].to(device))
+            track_pred = model(X_train[i].to(device))
 
-            jet_loss=jet_loss_fn(jet_pred, y_train[i][0].to(device))
-            trk_loss=trk_loss_fn(trk_pred, y_train[i][1].to(device))
-
-            loss = jet_loss+trk_loss
+            loss=loss_fn(track_pred, y_train[i].to(device))
 
             loss.backward()
             optimizer.step()
@@ -52,12 +49,9 @@ def train(model, loss_fns, optimizer, device, data, out_dir, step=15, gam=0.1, e
         model.eval()
         cumulative_loss_val = 0
         for i in range(num_val):
-            jet_pred, trk_pred = model(X_val[i][0].to(device), X_val[i][1].to(device), X_val[i][2].to(device))
+            track_pred = model(X_val[i].to(device))
             
-            jet_loss=jet_loss_fn(jet_pred, y_val[i][0].to(device))
-            trk_loss=trk_loss_fn(trk_pred, y_val[i][1].to(device))
-
-            loss = jet_loss+trk_loss
+            loss=loss_fn(track_pred, y_val[i].to(device))
 
             cumulative_loss_val+=loss.detach().cpu().numpy().mean()
 
