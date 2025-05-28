@@ -2,7 +2,7 @@
 ### Configuration Parameters ###
 ################################
 epochs: 20
-in_sample: "datasets/data_combined.pkl"
+in_sample: "/home/rakib/Physics-Datasets/DenoisingAE/10k_Events/data_combined.pkl"
 out_path: "output/results"
 embed_dim: 16
 num_heads: 4
