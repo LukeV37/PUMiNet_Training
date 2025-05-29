@@ -14,6 +14,9 @@ def train(model, loss_fns, optimizer, device, data, out_dir, step=15, gam=0.1, e
 
     # Initialize training history
     combined_history = []
+    
+    # Initialize a variable to track the best validation loss
+    best_val_loss = float('inf')
 
     # Calculate number of events
     num_train = len(X_train)
@@ -48,12 +51,13 @@ def train(model, loss_fns, optimizer, device, data, out_dir, step=15, gam=0.1, e
         # Evaluate model and track metrics on validation data
         model.eval()
         cumulative_loss_val = 0
-        for i in range(num_val):
-            track_pred = model(X_val[i].to(device))
-            
-            loss=loss_fn(track_pred, y_val[i].to(device))
+        with torch.no_grad():
+            for i in range(num_val):
+                track_pred = model(X_val[i].to(device))
+                
+                loss=loss_fn(track_pred, y_val[i].to(device))
 
-            cumulative_loss_val+=loss.detach().cpu().numpy().mean()
+                cumulative_loss_val+=loss.detach().cpu().numpy().mean()
 
         cumulative_loss_val = cumulative_loss_val / num_val
         combined_history.append([cumulative_loss_train, cumulative_loss_val])
@@ -62,12 +66,15 @@ def train(model, loss_fns, optimizer, device, data, out_dir, step=15, gam=0.1, e
         scheduler.step()
 
         # Print metrics at the end of each epoch
-        if e%1==0:
-            print('\tEpoch:',e+1,'\tTrain Loss:',round(cumulative_loss_train,6),'\tVal Loss:',round(cumulative_loss_val,6))
+        print(f'\tEpoch: {e+1:03d}\tTrain Loss: {cumulative_loss_train:.6f}\tVal Loss: {cumulative_loss_val:.6f}')
+        
+        # Check if the current validation loss is the best we've seen so far
+        if cumulative_loss_val < best_val_loss:
+            best_val_loss = cumulative_loss_val
+            torch.save(model.state_dict(), out_dir + "/best_model_weights.pth")
+            print(f'\t--- New best model found! Saving model with validation loss: {best_val_loss:.6f} ---')
 
         if (e+1)%step_size==0:
-            print("\t\tReducing Step Size by ", gamma)
-            
-        torch.save(model,out_dir+"/model_Epoch_"+str(e+1)+".torch")
+            print(f"\t---> Reducing Step Size by a factor of {gamma}")
 
     return np.array(combined_history)

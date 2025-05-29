@@ -22,6 +22,7 @@ class Encoder(nn.Module):
         tmp = F.gelu(self.out(latent))
         latent = latent + tmp
         return latent, weights
+    
 
 class Denoising_AE(nn.Module):
     def __init__(self, embed_dim, num_heads, latent_dim):
@@ -67,17 +68,21 @@ class Denoising_AE(nn.Module):
         self.regression = nn.Linear(self.embed_dim, self.num_trk_feats)
         
     def forward(self, tracks):
-        # Init
+        ## Copy of the original tracks for later use if needed
+        # initial_tracks = tracks 
+        
+        # Embed to higher dimension: Shape: [num_tracks, num_trk_feats(6)] -> [num_tracks, embed_dim]
         tracks = F.gelu(self.trk_initializer(tracks))
 
-        # Encoder
+        # --- Encoder Block ---
+        tracks = tracks.unsqueeze(0) # Add a batch dimension as we are only dealing with one event at a time: Shape: [num_tracks, embed_dim] -> [1, num_tracks, embed_dim]
         tracks, weights = self.Encode1(tracks, tracks, tracks)
         tracks, weights = self.Encode2(tracks, tracks, tracks)
         tracks, weights = self.Encode3(tracks, tracks, tracks)
-
-        # Reduction
-        num_tracks = len(tracks)
-        tracks = torch.sum(tracks,dim=0)
+        tracks = tracks.squeeze(0) # Squeeze the tracks back to original shape: [1, num_tracks, embed_dim] -> [num_tracks, embed_dim]
+        
+        # Copy of the encoded tracks for adding skip connections to decoder
+        encoded_tracks = tracks
 
         # Compression
         tracks = F.gelu(self.Compress1(tracks))
@@ -97,15 +102,25 @@ class Denoising_AE(nn.Module):
         tracks = F.gelu(self.Decompress6(tracks))
         tracks = F.gelu(self.Decompress7(tracks))
 
-        # Generation
-        tracks = torch.stack([tracks]*num_tracks, dim=0)
-
-        # Decoding
+        # --- Decoder Block ---
+        # Skip connection from encoder is added to bottleneck before decoding for allowing the model to easily learn to "do nothing" to the good data (hard-scatter) and focus its power on "removing" the bad data (pileup).
+        tracks = tracks + encoded_tracks  # Adding skip connection from encoder before decoding the bottleneck for better reconstruction
+        tracks = tracks.unsqueeze(0)  # Add batch dimension back: Shape: [num_tracks, embed_dim] -> [1, num_tracks, embed_dim]
         tracks, weights = self.Decode1(tracks, tracks, tracks)
         tracks, weights = self.Decode2(tracks, tracks, tracks)
         tracks, weights = self.Decode3(tracks, tracks, tracks)
+        tracks = tracks.squeeze(0) # Remove batch dimension: Shape: [1, num_tracks, embed_dim] -> [num_tracks, embed_dim]
 
         # Regression
         tracks = self.regression(tracks)
 
         return tracks
+
+
+
+if __name__ == '__main__':
+    model = Denoising_AE(16,4,32)
+    # Example input tensor with 10 tracks, each having 6 features
+    example_input = torch.randn(10, 6)  # 10 tracks with 6 features each
+    output = model(example_input)
+    print("Output shape:", output.shape)  # Should be (10, 6) if the model is working correctly
