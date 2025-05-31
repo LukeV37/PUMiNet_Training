@@ -203,13 +203,10 @@ def get_predictions_DAE(model, data_test, loss_fn, device, out_path, num_epsilon
     # L2 Norm Histograms
     plt.figure(figsize=(10, 6))
     if l2_norms_pred_for_true_signal:
-        # plt.hist(l2_norms_pred_for_true_signal, bins=50, alpha=0.7, label='True Signal Tracks (Predicted L2 Norms)', density=True)
         plt.hist(l2_norms_pred_for_true_signal, bins=50, alpha=0.7, label='True Signal Tracks (Predicted L2 Norms)', density=False)
     if l2_norms_pred_for_true_pileup:
-        # plt.hist(l2_norms_pred_for_true_signal, bins=50, alpha=0.7, label='True Signal Tracks (Predicted L2 Norms)', density=True)
         plt.hist(l2_norms_pred_for_true_pileup, bins=50, alpha=0.7, label='True Pileup Tracks (Predicted L2 Norms)', density=False)
     plt.xlabel("L2 Norm of Predicted Track Vector")
-    # plt.ylabel("Density")
     plt.ylabel("Counts (Log Scale)")
     plt.title("Distribution of Predicted L2 Norms")
     plt.yscale('log') 
