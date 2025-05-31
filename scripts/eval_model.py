@@ -1,200 +1,223 @@
-import numpy as np
-
-import matplotlib.pyplot as plt
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-import matplotlib.colors as mcolors
-
-from sklearn.metrics import mean_absolute_error, root_mean_squared_error, r2_score
-from sklearn.metrics import roc_curve, roc_auc_score
-from sklearn.metrics import confusion_matrix
-from sklearn.metrics import accuracy_score
-from sklearn.metrics import f1_score
-
-import pickle
-import sys
-
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+from tqdm import tqdm
 
-def ATLAS_roc(y_true, y_pred):
-    sig = (y_true==1)
-    bkg = ~sig
-
-    sig_eff = []
-    bkg_eff = []
-
-    thresholds = np.linspace(0,0.999,100)
-
-    for threshold in thresholds:
-        sig_eff.append(((y_pred[sig] > threshold).sum() / y_true[sig].shape[0]))
-        bkg_eff.append(((y_pred[bkg] > threshold).sum()  / y_true[bkg].shape[0]))
-
-    bkg_rej = [1/x for x in bkg_eff]
-    return np.array(sig_eff), np.array(bkg_rej), thresholds
-
-def roc(y_true, y_pred):
-    sig = (y_true==1)
-    bkg = ~sig
-
-    sig_eff = []
-    fake_rate = []
-
-    thresholds = np.linspace(0,0.97,100)
-
-    for threshold in thresholds:
-        sig_eff.append(((y_pred[sig] > threshold).sum() / y_true[sig].shape[0]))
-        fake_rate.append(((y_pred[bkg] > threshold).sum()  / y_true[bkg].shape[0]))
-
-    return np.array(sig_eff), np.array(fake_rate), thresholds
-
-def get_metrics(y_true, y_pred, threshold):
-    y_Pred = np.array(y_pred > threshold).astype(int)
-    y_True = np.array(y_true > threshold).astype(int)
-    x1,y1, thresholds1 = ATLAS_roc(y_True, y_pred)
-    x2,y2, thresholds2 = roc(y_True, y_pred)
-    AUC = roc_auc_score(y_True, y_Pred)
-    BA = accuracy_score(y_True, y_Pred)
-    f1 = f1_score(y_True, y_Pred)
-    return x1,y1,x2,y2,thresholds1,thresholds2,AUC,BA,f1
-
-def get_predictions(model, data, loss_fns, device, out_path):
-    
-    X_test, y_test = data
-    jet_loss_fn, trk_loss_fn = loss_fns
-
-    ### Evaluate Model
-
+def get_predictions_DAE(model, data_test, loss_fn, device, out_path, num_epsilon_steps=400):
+    print("Starting evaluation...")
     model.eval()
     model.to(device)
 
-    cumulative_loss_test = 0
-    cumulative_MSE_test = 0
-    cumulative_BCE_test = 0
+    X_test_list, y_test_list = data_test
 
-    Efrac_pred_labels = []
-    Efrac_true_labels = []
+    all_pred_signal_tracks_list = []
+    all_true_signal_tracks_list = []
+    all_pred_pileup_tracks_list = []
+    # True pileup tracks are all zeros, so we don't need to store them explicitly, just their predictions
 
-    Mfrac_pred_labels = []
-    Mfrac_true_labels = []
+    l2_norms_pred_for_true_signal = []
+    l2_norms_pred_for_true_pileup = []
 
-    trk_pred_labels = []
-    trk_true_labels = []
+    sum_of_event_mean_losses = 0.0
+    num_events_processed = 0
 
-    num_test = len(X_test)
-    for i in range(num_test):
-        jet_pred, trk_pred = model(X_test[i][0].to(device), X_test[i][1].to(device), X_test[i][2].to(device))
+    with torch.no_grad():
+        for i in tqdm(range(len(X_test_list)), desc="Evaluating Events"):
+            X_event = X_test_list[i].to(device)
+            y_event = y_test_list[i].to(device)
 
-        jet_loss=jet_loss_fn(jet_pred, y_test[i][0].to(device))
-        trk_loss=trk_loss_fn(trk_pred, y_test[i][1].to(device))
+            pred_tracks = model(X_event)
+            
+            # Calculate mean loss for the current event
+            event_mean_loss = loss_fn(pred_tracks, y_event)
+            
+            sum_of_event_mean_losses += event_mean_loss.item()
+            num_events_processed += 1
 
-        loss = jet_loss+trk_loss
+            pred_tracks_cpu = pred_tracks.cpu()
+            y_event_cpu = y_event.cpu()
 
-        cumulative_loss_test+=loss.detach().cpu().numpy().mean()
+            for trk_idx in range(y_event_cpu.size(0)):
+                true_track = y_event_cpu[trk_idx]
+                pred_track = pred_tracks_cpu[trk_idx]
+                
+                # L2 norm of the predicted track
+                pred_norm = torch.norm(pred_track, p=2).item()
+                # A track is pileup if all its true features are zero
+                is_true_pileup = torch.all(true_track == 0).item()
 
-        for j in range(jet_pred.shape[0]):
-            Efrac_pred_labels.append(float(jet_pred[j][0].detach().cpu().numpy()))
-            Efrac_true_labels.append(float(y_test[i][0][j][0].detach().numpy()))
-            Mfrac_pred_labels.append(float(jet_pred[j][1].detach().cpu().numpy()))
-            Mfrac_true_labels.append(float(y_test[i][0][j][1].detach().numpy()))
-
-        for j in range(trk_pred.shape[0]):
-            trk_pred_labels.append(float(trk_pred[j][0].detach().cpu().numpy()))
-            trk_true_labels.append(float(y_test[i][1][j][0].detach().numpy()))
-
-    cumulative_loss_test = cumulative_loss_test / num_test
-
-    print()
-    print("Test Loss:\t", cumulative_loss_test)
-    print()
-    print("Efrac R2:\t", r2_score(Efrac_true_labels, Efrac_pred_labels))
-    print("Efrac MAE:\t", mean_absolute_error(Efrac_true_labels, Efrac_pred_labels))
-    print("Efrac RMSE:\t", root_mean_squared_error(Efrac_true_labels, Efrac_pred_labels))
-    print()
-    print("Mfrac R2:\t", r2_score(Mfrac_true_labels, Mfrac_pred_labels))
-    print("Mfrac MAE:\t", mean_absolute_error(Mfrac_true_labels, Mfrac_pred_labels))
-    print("Mfrac RMSE:\t", root_mean_squared_error(Mfrac_true_labels, Mfrac_pred_labels))
-    print()
-
-    plt.figure()
-    plt.hist(Efrac_true_labels,histtype='step',color='r',label='True Efrac Distribution',bins=50,range=(0,1))
-    plt.hist(Efrac_pred_labels,histtype='step',color='b',label='Predicted Efrac Distribution',bins=50,range=(0,1))
-    plt.title("Predicted Efrac Distribution using Attention Model (\u03BC=60)")
-    plt.legend()
-    plt.yscale('log')
-    plt.xlabel('Efrac',loc='right')
-    plt.savefig(out_path+"/Efrac_1d.png")
-    #plt.show()
-
-    plt.figure()
-    plt.title("Efrac Distribution using Attention Model (\u03BC=60)")
-    plt.hist2d(Efrac_pred_labels,Efrac_true_labels, bins=100,norm=mcolors.PowerNorm(0.2))
-    plt.xlabel('Predicted Efrac',loc='right')
-    plt.ylabel('True Efrac',loc='top')
-    plt.savefig(out_path+"/Efrac_2d.png")
-    #plt.show()
-
-    plt.figure()
-    plt.hist(Mfrac_true_labels,histtype='step',color='r',label='True Mfrac Distribution',bins=50,range=(0,1))
-    plt.hist(Mfrac_pred_labels,histtype='step',color='b',label='Predicted Mfrac Distribution',bins=50,range=(0,1))
-    plt.title("Predicted Mfrac Distribution using Attention Model (\u03BC=60)")
-    plt.legend()
-    plt.yscale('log')
-    plt.xlabel('Mfrac',loc='right')
-    plt.savefig(out_path+"/Mfrac_1d.png")
-    #plt.show()
-
-    plt.figure()
-    plt.title("Mfrac Distribution using Attention Model (\u03BC=60)")
-    plt.hist2d(Mfrac_pred_labels,Mfrac_true_labels, bins=100,norm=mcolors.PowerNorm(0.2))
-    plt.xlabel('Predicted Mfrac',loc='right')
-    plt.ylabel('True Mfrac',loc='top')
-    plt.savefig(out_path+"/Mfrac_2d.png")
-    #plt.show()
-
-    trk_true_labels = np.array(trk_true_labels)
-    trk_pred_labels = np.array(trk_pred_labels)
-
-    sig = trk_true_labels==0
-    bkg = ~sig
-
-    plt.figure()
-    plt.hist(trk_pred_labels[sig],histtype='step',color='r',label='HS Prediction',bins=50,range=(0,1))
-    plt.hist(trk_pred_labels[bkg],histtype='step',color='b',label='PU Prediction',bins=50,range=(0,1))
-    plt.title("Predicted Track Distribution using Attention Model (\u03BC=60)")
-    plt.legend()
-    plt.yscale('log')
-    plt.xlabel('isPU',loc='right')
-    plt.savefig(out_path+"/Trk_1d.png")
-    #plt.show()
+                if is_true_pileup:
+                    all_pred_pileup_tracks_list.append(pred_track)
+                    l2_norms_pred_for_true_pileup.append(pred_norm)
+                else:
+                    all_pred_signal_tracks_list.append(pred_track)
+                    all_true_signal_tracks_list.append(true_track)
+                    l2_norms_pred_for_true_signal.append(pred_norm)
     
-    fig, (ax1, ax2) = plt.subplots(2,1,figsize=(16,9), gridspec_kw={'height_ratios': [3, 1]})
+    avg_of_event_mean_losses = sum_of_event_mean_losses / num_events_processed if num_events_processed > 0 else 0
+    print(f"\nAverage of Per-Event Mean Test MSE Loss: {avg_of_event_mean_losses:.6f}")
+    
+    # Initialize metrics for per-track evaluation
+    mse_signal, mae_signal, mse_pileup, mae_pileup = np.nan, np.nan, np.nan, np.nan
 
-    x1,y1,x1_v2,y1_v2,th1,th1_v2,AUC1,BA1,f11 = get_metrics(np.array(trk_true_labels), np.array(trk_pred_labels), 0.5)
+    # --- Convert lists to tensors for metric calculations ---
+    if all_pred_signal_tracks_list:
+        all_pred_signal_t = torch.stack(all_pred_signal_tracks_list)
+        all_true_signal_t = torch.stack(all_true_signal_tracks_list)
+        
+        mse_signal = F.mse_loss(all_pred_signal_t, all_true_signal_t).item()
+        mae_signal = F.l1_loss(all_pred_signal_t, all_true_signal_t).item()
+        print("\nSignal Tracks Reconstruction (Per-Track Metrics):")
+        print(f"  MSE: {mse_signal:.6f}")
+        print(f"  MAE: {mae_signal:.6f}")
+    else:
+        print("\nNo signal tracks found in the test set for reconstruction evaluation.")
 
-    ax1.set_title("Track isPU ATLAS ROC Curve")
-    ax1.set_xlabel("sig eff",loc='right')
-    ax1.set_ylabel("bkg rej")
+    if all_pred_pileup_tracks_list:
+        all_pred_pileup_t = torch.stack(all_pred_pileup_tracks_list)
+        zeros_for_pileup = torch.zeros_like(all_pred_pileup_t)
+        
+        mse_pileup = F.mse_loss(all_pred_pileup_t, zeros_for_pileup).item()
+        mae_pileup = F.l1_loss(all_pred_pileup_t, zeros_for_pileup).item()
+        print("\nPileup Tracks Suppression (Per-Track Metrics, distance from zero vector):")
+        print(f"  MSE: {mse_pileup:.6f}")
+        print(f"  MAE: {mae_pileup:.6f}")
+    else:
+        print("\nNo pileup tracks found in the test set for suppression evaluation.")
 
-    ax1.plot(x1,y1, label="Attention",color='m')
-    AUC1 = "Attention Model AUC: " + str(round(AUC1,4))
-    ax1.text(0.51,8,AUC1)
+     # --- ROC Curve Data Preparation ---
+    if not l2_norms_pred_for_true_signal and not l2_norms_pred_for_true_pileup:
+        print("\nNo tracks available to generate ROC curve or L2 norm histograms.")
+        return
 
-    x = 1-np.flip(th1)
-    ratio1 = np.interp(x,np.flip(x1),np.flip(y1))/np.interp(x,np.flip(x1),np.flip(y1))
-    ax2.plot(x,ratio1,linestyle='--',color='m')
+    # True labels for ROC: 1 for signal, 0 for pileup
+    y_true_roc = np.array([1] * len(l2_norms_pred_for_true_signal) + [0] * len(l2_norms_pred_for_true_pileup))
+    # Predicted scores for ROC: L2 norm of the predicted track
+    y_score_roc = np.array(l2_norms_pred_for_true_signal + l2_norms_pred_for_true_pileup)
 
-    # General Plot Settings
-    ax1.legend()
-    ax1.set_yscale('log')
-    ax1.grid(which='both')
-    ax2.grid(which='both')
-    ax1.set_xlim(0.5,1)
-    ax2.set_xlim(0.5,1)
-    plt.savefig(out_path+"/Trk_ATLAS_ROC.png")
-    #plt.show()
+    roc_signal_preservation_rates = []
+    roc_pileup_false_positive_rates = []
+    roc_points_data = []
+    
+     # Determine a sensible range for epsilon thresholds based on norms
+    min_norm = 0
+    max_norm = np.max(y_score_roc) if y_score_roc.size > 0 else 1.0 
+    if max_norm == 0: max_norm = 1.0  # handle case where all norms are 0
+    
+    epsilon_thresholds = np.linspace(min_norm, max_norm, num_epsilon_steps)
+    if num_epsilon_steps == 1 and max_norm > min_norm : # Ensure at least two points if range allows for linspace
+         epsilon_thresholds = np.array([min_norm,max_norm])
+    elif num_epsilon_steps == 1 and max_norm == min_norm: # handles edge case where all norms are same
+         epsilon_thresholds = np.array([min_norm])
 
-    print("Binary Accuracy: ", BA1, "\tF1 Score: ", f11)
-    print()
-    print("Done!")
+    print("\nCalculating ROC points...")
+    for epsilon in tqdm(epsilon_thresholds, desc="Calculating ROC points", leave=False):
+        predicted_as_signal = (y_score_roc >= epsilon)
+        
+        tp = np.sum((predicted_as_signal == 1) & (y_true_roc == 1))
+        fn = np.sum((predicted_as_signal == 0) & (y_true_roc == 1))
+        tn = np.sum((predicted_as_signal == 0) & (y_true_roc == 0))
+        fp = np.sum((predicted_as_signal == 1) & (y_true_roc == 0))
+
+        signal_preservation_rate = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        pileup_false_positive_rate = fp / (fp + tn) if (fp + tn) > 0 else 0.0 # This is 1 - Pileup Suppression Rate
+
+        roc_signal_preservation_rates.append(signal_preservation_rate)
+        roc_pileup_false_positive_rates.append(pileup_false_positive_rate)
+        roc_points_data.append({'epsilon': epsilon, 'tpr': signal_preservation_rate, 'fpr': pileup_false_positive_rate})
+    
+    
+    # --- Print specific rates for a chosen epsilon threshold --- # i need to decide on a sensible epsilon threshold: maybe median of the pileup L2 norms?
+    chosen_epsilon = 1.0 
+    predicted_as_signal_chosen_eps = (y_score_roc >= chosen_epsilon)
+    tp_chosen = np.sum((predicted_as_signal_chosen_eps == 1) & (y_true_roc == 1))
+    fn_chosen = np.sum((predicted_as_signal_chosen_eps == 0) & (y_true_roc == 1))
+    tn_chosen = np.sum((predicted_as_signal_chosen_eps == 0) & (y_true_roc == 0))
+    fp_chosen = np.sum((predicted_as_signal_chosen_eps == 1) & (y_true_roc == 0))
+
+    tpr_chosen = tp_chosen / (tp_chosen + fn_chosen) if (tp_chosen + fn_chosen) > 0 else 0.0 # this is signal preservation rate or (TPR)
+    fnr_chosen = fn_chosen / (tp_chosen + fn_chosen) if (tp_chosen + fn_chosen) > 0 else 0.0 # this is signal false negative rate or (FNR = 1 - TPR)
+    tnr_chosen = tn_chosen / (tn_chosen + fp_chosen) if (tn_chosen + fp_chosen) > 0 else 0.0 # this is pileup suppression rate or (TNR)
+    fpr_chosen = fp_chosen / (fp_chosen + tn_chosen) if (fp_chosen + tn_chosen) > 0 else 0.0 # this is pileup false positive rate or (FPR = 1 - TNR)
+    
+
+
+    print(f"\nMetrics at Epsilon = {chosen_epsilon:.3f} (threshold on L2 norm to be considered signal):")
+    print(f"  Signal Preservation Rate (TPR): {tpr_chosen:.4f}") # Out of all true signal tracks, how many were correctly predicted as signal
+    print(f"  Signal False Negative Rate (FNR = 1 - TPR): {fnr_chosen:.4f}") # Out of all true signal tracks, how many were incorrectly predicted as pileup
+    print(f"  Pileup Suppression Rate (TNR):  {tnr_chosen:.4f}") # Out of all true pileup tracks, how many were correctly predicted as pileup
+    print(f"  Pileup False Positive Rate (FPR = 1 - TNR): {fpr_chosen:.4f}")  # Out of all true pileup tracks, how many were incorrectly predicted as signal
+    
+    
+	# # Print all ROC data points
+    # print("\n--- ROC Data Points ---")
+    # print("Epsilon   | TPR     | FPR")
+    # print("--------------------------")
+    # for point in roc_points_data:
+    #     print(f"{point['epsilon']:<9.4f} | {point['tpr']:<7.4f} | {point['fpr']:<7.4f}")
+    
+    # Save the printed metrics to a text file
+    metrics_save_path = os.path.join(out_path, "DAE_metrics.txt")
+    with open(metrics_save_path, 'w') as f:
+        f.write(f"Average of Per-Event Mean Test MSE Loss: {avg_of_event_mean_losses:.6f}\n")
+        f.write("\nSignal Tracks Reconstruction (Per-Track Metrics):\n")
+        f.write(f"  MSE: {mse_signal if not np.isnan(mse_signal) else 'N/A':.6f}\n")
+        f.write(f"  MAE: {mae_signal if not np.isnan(mae_signal) else 'N/A':.6f}\n")
+        f.write("\nPileup Tracks Suppression (Per-Track Metrics, distance from zero vector):\n")
+        f.write(f"  MSE: {mse_pileup if not np.isnan(mse_pileup) else 'N/A':.6f}\n")
+        f.write(f"  MAE: {mae_pileup if not np.isnan(mae_pileup) else 'N/A':.6f}\n")
+        f.write(f"\nMetrics at Epsilon = {chosen_epsilon:.3f} (threshold on L2 norm to be considered signal):\n")
+        f.write(f"  Signal Preservation Rate (TPR): {tpr_chosen:.4f}\n")
+        f.write(f"  Pileup Suppression Rate (TNR):  {tnr_chosen:.4f}\n")
+        f.write("\n\n--- ROC Data Points ---\n")
+        f.write("Epsilon   | TPR     | FPR\n")
+        f.write("---------------------------\n")
+        for point in roc_points_data:
+            f.write(f"{point['epsilon']:<9.4f} | {point['tpr']:<7.4f} | {point['fpr']:<7.4f}\n")
+            # Only save until epsilon is 50
+            if point['epsilon'] > 50.0:
+                break
+    print(f"\nMetrics saved to {metrics_save_path}")
+
+    
+    # --- Plotting ---
+    os.makedirs(out_path, exist_ok=True)
+
+     # ROC Curve
+    plt.figure(figsize=(10, 8))
+    plt.plot(roc_pileup_false_positive_rates, roc_signal_preservation_rates, marker='.', label='Model ROC')
+    plt.plot([0, 1], [0, 1], linestyle='--', color='grey', label='Random Guess')
+    plt.xlabel("Pileup False Positive Rate (1 - Pileup Suppression Rate)")
+    plt.ylabel("Signal Preservation Rate (TPR)")
+    plt.title("ROC Curve: Denoising Autoencoder")
+    plt.legend()
+    plt.grid(True)
+    roc_save_path = os.path.join(out_path, "DAE_ROC_curve.png")
+    plt.savefig(roc_save_path)
+    plt.close()
+    print(f"ROC curve saved to {roc_save_path}")
+
+    
+    # L2 Norm Histograms
+    plt.figure(figsize=(10, 6))
+    if l2_norms_pred_for_true_signal:
+        # plt.hist(l2_norms_pred_for_true_signal, bins=50, alpha=0.7, label='True Signal Tracks (Predicted L2 Norms)', density=True)
+        plt.hist(l2_norms_pred_for_true_signal, bins=50, alpha=0.7, label='True Signal Tracks (Predicted L2 Norms)', density=False)
+    if l2_norms_pred_for_true_pileup:
+        # plt.hist(l2_norms_pred_for_true_signal, bins=50, alpha=0.7, label='True Signal Tracks (Predicted L2 Norms)', density=True)
+        plt.hist(l2_norms_pred_for_true_pileup, bins=50, alpha=0.7, label='True Pileup Tracks (Predicted L2 Norms)', density=False)
+    plt.xlabel("L2 Norm of Predicted Track Vector")
+    # plt.ylabel("Density")
+    plt.ylabel("Counts (Log Scale)")
+    plt.title("Distribution of Predicted L2 Norms")
+    plt.yscale('log') 
+    plt.legend()
+    plt.grid(True)
+    hist_save_path = os.path.join(out_path, "DAE_L2_norm_histograms.png")
+    plt.savefig(hist_save_path)
+    plt.close()
+    print(f"L2 norm histograms saved to {hist_save_path}")
+
+    print("\nEvaluation finished.")

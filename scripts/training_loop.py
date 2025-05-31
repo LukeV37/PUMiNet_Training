@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from ..train import embed_dim, num_heads, latent_dim
 
 ### Define Training Loop
 def train(model, loss_fns, optimizer, device, data, out_dir, step=15, gam=0.1, epochs=40):
@@ -71,7 +72,7 @@ def train(model, loss_fns, optimizer, device, data, out_dir, step=15, gam=0.1, e
         # Check if the current validation loss is the best we've seen so far
         if cumulative_loss_val < best_val_loss:
             best_val_loss = cumulative_loss_val
-            torch.save(model.state_dict(), out_dir + "/best_model_weights.pth")
+            torch.save(model.state_dict(), out_dir + f"/best_model_weights-embed{embed_dim}-head{num_heads}-latent{latent_dim}.pth")
             print(f'\t--- New best model found! Saving model with validation loss: {best_val_loss:.6f} ---')
 
         if (e+1)%step_size==0:
