@@ -129,7 +129,7 @@ def get_predictions_DAE(model, data_test, loss_fn, device, out_path, num_epsilon
         roc_points_data.append({'epsilon': epsilon, 'tpr': signal_preservation_rate, 'fpr': pileup_false_positive_rate})
     
     
-    # --- Print specific rates for a chosen epsilon threshold --- # i need to decide on a sensible epsilon threshold: maybe median of the pileup L2 norms?
+    # --- Print specific rates for a chosen epsilon threshold ---
     chosen_epsilon = 1.0 
     predicted_as_signal_chosen_eps = (y_score_roc >= chosen_epsilon)
     tp_chosen = np.sum((predicted_as_signal_chosen_eps == 1) & (y_true_roc == 1))
